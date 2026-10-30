@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<title>Лисёнок Рико</title>
+<style>
+html,body{margin:0;height:100%;background:#111;overflow:hidden;overscroll-behavior:none;touch-action:none;-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;-webkit-tap-highlight-color:transparent}
+#wrap{position:fixed;inset:0;display:flex;align-items:center;justify-content:center}
+canvas{image-rendering:pixelated;background:#6ec6ff}
+.btn{position:fixed;bottom:18px;width:84px;height:84px;border-radius:50%;background:rgba(255,255,255,.2);border:3px solid rgba(255,255,255,.5);color:#fff;font:bold 32px sans-serif;display:flex;align-items:center;justify-content:center;touch-action:none}
+.btn.on{background:rgba(255,255,255,.45)}
+#left{left:18px}
+#right{left:120px}
+#jump{right:22px;width:100px;height:100px}
+</style>
+</head>
+<body>
+<div id="wrap"><canvas id="c"></canvas></div>
+<div class="btn" id="left">◀</div>
+<div class="btn" id="right">▶</div>
+<div class="btn" id="jump">▲</div>
+<script>
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const VW = 480, VH = 272, T = 16, LW = 150, LH = 17;
+cv.width = VW; cv.height = VH;
+function resize() {
+  const s = Math.min(innerWidth / VW, innerHeight / VH);
+  cv.style.width = Math.floor(VW * s) + 'px';
+  cv.style.height = Math.floor(VH * s) + 'px';
+}
+addEventListener('resize', resize); resize();
+document.addEventListener('contextmenu', e => e.preventDefault());
+
+/* ---------- звук ---------- */
+let AC = null;
+function audioInit() {
+  if (!AC) { try { AC = new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {} }
+  if (AC && AC.state === 'suspended') AC.resume();
+}
+function beep(f, d, type, v, slide) {
+  if (!AC) return;
+  try {
+    const o = AC.createOscillator(), g = AC.createGain(), t = AC.currentTime;
+    o.type = type || 'square';
+    o.frequency.setValueAtTime(f, t);
+    if (slide) o.frequency.linearRampToValueAtTime(Math.max(40, f + slide), t + d);
+    g.gain.setValueAtTime(v || 0.05, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + d);
+    o.connect(g); g.connect(AC.destination);
+    o.start(t); o.stop(t + d);
+  } catch (e) {}
+}
+
+/* ---------- управление ---------- */
+const keys = { left: false, right: false, jump: false };
+const kmap = { ArrowLeft: 'left', KeyA: 'left', ArrowRight: 'right', KeyD: 'right', ArrowUp: 'jump', KeyW: 'jump', Space: 'jump', KeyZ: 'jump' };
+addEventListener('keydown', e => { const k = kmap[e.code]; if (k) { keys[k] = true; e.preventDefault(); } anyPress(); });
+addEventListener('keyup', e => { const k = kmap[e.code]; if (k) { keys[k] = false; e.preventDefault(); } });
+addEventListener('blur', () => { keys.left = keys.right = keys.jump = false; });
+for (const id of ['left', 'right', 'jump']) {
+  const el = document.getElementById(id);
+  const on = e => { e.preventDefault(); keys[id] = true; el.classList.add('on'); anyPress(); };
+  const off = e => { e.preventDefault(); keys[id] = false; el.classList.remove('on'); };
+  el.addEventListener('pointerdown', on);
+  el.addEventListener('pointerup', off);
+  el.addEventListener('pointercancel', off);
+  el.addEventListener('pointerleave', off);
+}
+addEventListener('pointerdown', anyPress);
+function anyPress() {
+  audioInit();
+  if (state === 'title' || (state === 'over' && stateT > 45) || (state === 'win' && stateT > 60)) startGame();
+}
+
+/* ---------- уровень ---------- */
+// 0 пусто, 1 земля, 2 кирпич, 3 блок с монетой, 4 пустой блок
+let map, coins, enemies, pops = [], bumps = [], flagX = 136 * T;
+function buildLevel() {
+  map = Array.from({ length: LH }, () => new Array(LW).fill(0));
+  const fill = (x, y, w, h, t) => {
+    for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++)
+      if (i >= 0 && i < LW && j >= 0 && j < LH) map[j][i] = t;
+  };
+  fill(0, 15, LW, 2, 1);
+  [[32, 3], [62, 4], [92, 3], [110, 4]].forEach(([x, w]) => fill(x, 15, w, 2, 0));
+  [[12, 2], [13, 3], [14, 2], [15, 3], [16, 2], [54, 3], [56, 2], [57, 3],
+   [98, 2], [99, 3], [100, 2], [101, 3], [102, 2]].forEach(([x, t]) => fill(x, 11, 1, 1, t));
+  fill(22, 12, 4, 1, 2); fill(26, 9, 3, 1, 2); fill(63, 12, 2, 1, 2);
+  fill(70, 12, 3, 1, 2); fill(74, 10, 3, 1, 2); fill(78, 12, 3, 1, 2); fill(111, 12, 2, 1, 2);
+  fill(40, 13, 2, 2, 1); fill(48, 12, 2, 3, 1); fill(84, 13, 2, 2, 1); fill(86, 12, 2, 3, 1);
+  for (let i = 0; i < 6; i++) fill(120 + i, 14 - i, 1, i + 1, 1);
+
+  coins = [];
+  const cr = (x, y, n) => { for (let i = 0; i < n; i++) coins.push({ x: x + i, y, got: false }); };
+  cr(12, 9, 5); cr(22, 10, 4); cr(26, 7, 3); cr(32, 13, 1); cr(33, 12, 1); cr(34, 13, 1);
+  cr(39, 11, 4); cr(47, 10, 4); cr(63, 10, 2); cr(70, 10, 3); cr(74, 8, 3); cr(78, 10, 3);
+  cr(98, 9, 5); cr(111, 10, 2);
+  for (let i = 0; i < 6; i++) cr(120 + i, 12 - i, 1);
+
+  enemies = [];
+  [18, 28, 44, 52, 60, 68, 76, 90, 96, 106, 116].forEach(x =>
+    enemies.push({ x: x * T, y: 15 * T - 12, w: 14, h: 12, vx: -0.5, vy: 0, alive: true, sq: 0, ground: false, anim: 0 }));
+  pops = []; bumps = [];
+}
+
+function solid(tx, ty) {
+  if (tx < 0 || tx >= LW) return true;
+  if (ty < 0 || ty >= LH) return false;
+  return map[ty][tx] !== 0;
+}
+function moveX(e) {
+  e.x += e.vx;
+  const y0 = Math.floor(e.y / T), y1 = Math.floor((e.y + e.h - 0.01) / T);
+  if (e.vx > 0) {
+    const tx = Math.floor((e.x + e.w - 0.01) / T);
+    for (let ty = y0; ty <= y1; ty++) if (solid(tx, ty)) { e.x = tx * T - e.w; return true; }
+  } else if (e.vx < 0) {
+    const tx = Math.floor(e.x / T);
+    for (let ty = y0; ty <= y1; ty++) if (solid(tx, ty)) { e.x = (tx + 1) * T; return true; }
+  }
+  return false;
+}
+function moveY(e) {
+  e.y += e.vy; e.ground = false;
+  const x0 = Math.floor(e.x / T), x1 = Math.floor((e.x + e.w - 0.01) / T);
+  if (e.vy > 0) {
+    const ty = Math.floor((e.y + e.h - 0.01) / T);
+    for (let tx = x0; tx <= x1; tx++) if (solid(tx, ty)) { e.y = ty * T - e.h; e.vy = 0; e.ground = true; break; }
+  } else if (e.vy < 0) {
+    const ty = Math.floor(e.y / T);
+    const mid = Math.floor((e.x + e.w / 2) / T);
+    let hit = null;
+    if (solid(mid, ty)) hit = mid;
+    else for (let tx = x0; tx <= x1; tx++) if (solid(tx, ty)) { hit = tx; break; }
+    if (hit !== null) { e.y = (ty + 1) * T; e.vy = 0; return { tx: hit, ty }; }
+  }
+  return null;
+}
+
+/* ---------- состояние ---------- */
+let state = 'title', stateT = 0, lives = 3, coinCount = 0, score = 0, camX = 0, checkX = 2 * T, frame = 0, prevJump = false;
+const P = { x: 0, y: 0, w: 12, h: 16, vx: 0, vy: 0, ground: false, face: 1, coyote: 0, jbuf: 0, anim: 0 };
+
+function respawn() {
+  P.x = checkX; P.y = 15 * T - P.h; P.vx = 0; P.vy = 0; P.coyote = 0; P.jbuf = 0; P.face = 1;
+  camX = Math.max(0, Math.min(LW * T - VW, P.x - VW / 2));
+}
+function startGame() {
+  buildLevel(); lives = 3; coinCount = 0; score = 0; checkX = 2 * T;
+  respawn(); state = 'play'; stateT = 0; prevJump = keys.jump;
+}
+function die() {
+  if (state !== 'play') return;
+  state = 'dying'; stateT = 0; lives--; P.vy = -5.5; P.vx = 0;
+  beep(300, 0.5, 'sawtooth', 0.05, -230);
+}
+function hitBlock(tx, ty) {
+  const t = map[ty][tx];
+  if (t === 3) {
+    map[ty][tx] = 4; coinCount++; score += 10;
+    pops.push({ x: tx * T + 4, y: ty * T - 4, t: 0 });
+    bumps.push({ tx, ty, t: 0 });
+    beep(988, 0.08, 'square', 0.05); beep(1319, 0.22, 'square', 0.05);
+  } else if (t === 2) {
+    bumps.push({ tx, ty, t: 0 });
+    beep(150, 0.06, 'square', 0.05);
+  }
+  for (const e of enemies)
+    if (e.alive && Math.floor((e.x + e.w / 2) / T) === tx && Math.abs(e.y + e.h - ty * T) < 2) {
+      e.alive = false; e.sq = 20; score += 100;
+    }
+}
+
+function stepPlay() {
+  const dir = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+  if (dir) { P.vx += dir * (P.ground ? 0.25 : 0.18); P.face = dir; }
+  else { const f = P.ground ? 0.2 : 0.04; P.vx = P.vx > 0 ? Math.max(0, P.vx - f) : Math.min(0, P.vx + f); }
+  P.vx = Math.max(-2.2, Math.min(2.2, P.vx));
+
+  if (keys.jump && !prevJump) P.jbuf = 7; else if (P.jbuf > 0) P.jbuf--;
+  P.coyote = P.ground ? 6 : Math.max(0, P.coyote - 1);
+  if (P.jbuf > 0 && P.coyote > 0) {
+    P.vy = -6.6; P.jbuf = 0; P.coyote = 0; P.ground = false;
+    beep(330, 0.18, 'square', 0.05, 330);
+  }
+  if (!keys.jump && P.vy < -2.5) P.vy = -2.5;
+  P.vy = Math.min(P.vy + 0.35, 7);
+
+  moveX(P);
+  if (P.x < 0) { P.x = 0; P.vx = 0; }
+  if (P.x > LW * T - P.w) { P.x = LW * T - P.w; P.vx = 0; }
+  const top = moveY(P);
+  if (top) hitBlock(top.tx, top.ty);
+  P.anim += Math.abs(P.vx) * 0.15;
+
+  if (P.x > 66 * T) checkX = 66 * T;
+
+  for (const c of coins) {
+    if (c.got) continue;
+    const cx = c.x * T + 3, cy = c.y * T + 3;
+    if (P.x < cx + 10 && P.x + P.w > cx && P.y < cy + 10 && P.y + P.h > cy) {
+      c.got = true; coinCount++; score += 10;
+      beep(988, 0.07, 'square', 0.04); beep(1319, 0.15, 'square', 0.04);
+    }
+  }
+
+  for (const e of enemies) {
+    if (!e.alive) { if (e.sq > 0) e.sq--; continue; }
+    if (Math.abs(e.x - camX - VW / 2) > VW) continue;
+    e.vy = Math.min(e.vy + 0.35, 6);
+    moveY(e);
+    if (e.ground) {
+      const ax = e.vx > 0 ? e.x + e.w + 1 : e.x - 1;
+      if (!solid(Math.floor(ax / T), Math.floor((e.y + e.h + 2) / T))) e.vx = -e.vx;
+    }
+    if (moveX(e)) e.vx = -e.vx;
+    e.anim += 0.1;
+    if (e.y > LH * T + 40) { e.alive = false; e.sq = 0; continue; }
+    if (P.x < e.x + e.w && P.x + P.w > e.x && P.y < e.y + e.h && P.y + P.h > e.y) {
+      if (P.vy > 0 && P.y + P.h - e.y < 11) {
+        e.alive = false; e.sq = 25; P.vy = -4.8; score += 100;
+        beep(260, 0.12, 'square', 0.06, -140);
+      } else { die(); return; }
+    }
+  }
+
+  if (P.x + P.w > flagX + 6) {
+    state = 'win'; stateT = 0;
+    [523, 659, 784, 1047].forEach((f, i) => setTimeout(() => beep(f, 0.25, 'square', 0.05), i * 140));
+    return;
+  }
+  if (P.y > LH * T + 20) { die(); return; }
+
+  const tx = Math.max(0, Math.min(LW * T - VW, P.x + P.w / 2 - VW / 2 + P.face * 20));
+  camX += (tx - camX) * 0.1;
+}
+
+function step() {
+  frame++; stateT++;
+  if (state === 'play') stepPlay();
+  else if (state === 'dying') {
+    P.vy = Math.min(P.vy + 0.3, 8); P.y += P.vy;
+    if (stateT > 100) {
+      if (lives <= 0) { state = 'over'; stateT = 0; } else { respawn(); state = 'play'; stateT = 0; }
+    }
+  } else if (state === 'title') {
+    camX = (Math.sin(frame * 0.004) * 0.5 + 0.5) * (LW * T - VW);
+  }
+  for (const b of bumps) b.t++;
+  bumps = bumps.filter(b => b.t < 10);
+  for (const p of pops) p.t++;
+  pops = pops.filter(p => p.t < 30);
+  prevJump = keys.jump;
+}
+
+/* ---------- рисование ---------- */
+const R = (c, a, b, w, h) => { ctx.fillStyle = c; ctx.fillRect(a, b, w, h); };
+
+function drawTile(t, bx, by, tx, ty) {
+  if (t === 1) {
+    R('#b9762f', bx, by, T, T);
+    R('#8d5a22', bx + 3, by + 8, 2, 2); R('#8d5a22', bx + 10, by + 11, 2, 2);
+    if (!solid(tx, ty - 1) || ty === 0) { R('#4cc04c', bx, by, T, 4); R('#3a9a3a', bx, by + 4, T, 1); }
+  } else if (t === 2) {
+    R('#c8582b', bx, by, T, T);
+    R('#7a2e12', bx, by + 7, T, 1); R('#7a2e12', bx, by + 15, T, 1);
+    R('#7a2e12', bx + 7, by, 1, 7); R('#7a2e12', bx + 3, by + 8, 1, 7); R('#7a2e12', bx + 11, by + 8, 1, 7);
+    R('#e8774a', bx, by, T, 1);
+  } else if (t === 3) {
+    R('#a56a00', bx, by, T, T); R('#f5b800', bx + 1, by + 1, T - 2, T - 2);
+    R('#ffd95a', bx + 1, by + 1, T - 2, 1);
+    ctx.fillStyle = '#7a4a00'; ctx.font = 'bold 12px monospace'; ctx.textAlign = 'center';
+    ctx.fillText('?', bx + 8, by + 13);
+  } else if (t === 4) {
+    R('#5a4020', bx, by, T, T); R('#8a6a3a', bx + 1, by + 1, T - 2, T - 2);
+  }
+}
+
+function drawCoin(cx, cy) {
+  const w = Math.abs(Math.cos(frame * 0.08 + cx * 0.3)) * 6 + 2;
+  R('#c98a00', cx - w / 2 - 1, cy - 6, w + 2, 12);
+  R('#ffd21f', cx - w / 2, cy - 5, w, 10);
+}
+
+function drawPlayer() {
+  const x = Math.round(P.x - camX) - 2, y = Math.round(P.y);
+  ctx.save();
+  if (P.face < 0) { ctx.translate(x + 16, y); ctx.scale(-1, 1); } else ctx.translate(x, y);
+  const o = '#f08a24', w = '#fff', br = '#7a3b0c';
+  const moving = P.ground && Math.abs(P.vx) > 0.3;
+  const s = moving ? Math.floor(P.anim) % 2 : 0;
+  R(o, 0, 7, 4, 5); R(w, 0, 7, 2, 2);
+  R(br, 5 + s, 14, 3, 2); R(br, 9 - s, 14, 3, 2);
+  R(o, 4, 8, 8, 6); R('#d1243b', 5, 8, 8, 2); R(w, 8, 11, 3, 3);
+  R(o, 5, 2, 9, 7); R(o, 5, 0, 2, 3); R(o, 11, 0, 2, 3); R(br, 6, 1, 1, 2); R(br, 12, 1, 1, 2);
+  R(w, 9, 5, 5, 4); R('#222', 13, 5, 2, 2); R('#222', 10, 3, 2, 2);
+  ctx.restore();
+}
+
+function drawEnemy(e) {
+  const x = Math.round(e.x - camX), y = Math.round(e.y);
+  if (!e.alive) {
+    R('#8e44ad', x, y + 8, 14, 4); R('#fff', x + 3, y + 9, 2, 2); R('#fff', x + 9, y + 9, 2, 2);
+    return;
+  }
+  R('#8e44ad', x + 1, y + 2, 12, 8); R('#8e44ad', x + 3, y, 8, 2); R('#8e44ad', x, y + 5, 14, 4);
+  R('#fff', x + 3, y + 4, 3, 3); R('#fff', x + 8, y + 4, 3, 3);
+  const dx = e.vx < 0 ? 0 : 2;
+  R('#111', x + 3 + dx, y + 5, 1, 2); R('#111', x + 8 + dx, y + 5, 1, 2);
+  R('#111', x + 3, y + 3, 3, 1); R('#111', x + 8, y + 3, 3, 1);
+  const f = Math.floor(e.anim) % 2;
+  R('#4a235a', x + 1 + f, y + 10, 4, 2); R('#4a235a', x + 9 - f, y + 10, 4, 2);
+}
+
+function shadowText(txt, x, y, color) {
+  ctx.fillStyle = 'rgba(0,0,0,.6)'; ctx.fillText(txt, x + 1, y + 1);
+  ctx.fillStyle = color; ctx.fillText(txt, x, y);
+}
+
+function draw() {
+  const cam = Math.round(camX);
+  R('#6ec6ff', 0, 0, VW, VH);
+
+  // облака
+  ctx.globalAlpha = 0.9;
+  for (let i = 0; i < 12; i++) {
+    const x = (((i * 173 + 40 - camX * 0.25) % (VW + 120)) + (VW + 120)) % (VW + 120) - 60;
+    const y = 24 + (i * 37) % 70;
+    R('#fff', x, y, 40, 10); R('#fff', x + 8, y - 6, 24, 8);
+  }
+  ctx.globalAlpha = 1;
+
+  // холмы
+  for (let i = 0; i < 9; i++) {
+    const hx = (((i * 230 - camX * 0.5) % 1500) + 1500) % 1500 - 200;
+    ctx.fillStyle = i % 2 ? '#4aa54a' : '#58b858';
+    ctx.beginPath(); ctx.ellipse(hx + 80, 240, 90, 50 + (i % 3) * 14, 0, Math.PI, 2 * Math.PI); ctx.fill();
+  }
+
+  // тайлы
+  const x0 = Math.max(0, Math.floor(cam / T)), x1 = Math.min(LW - 1, Math.floor((cam + VW) / T));
+  for (let ty = 0; ty < LH; ty++) for (let tx = x0; tx <= x1; tx++) {
+    const t = map[ty][tx]; if (!t) continue;
+    let by = ty * T;
+    for (const b of bumps) if (b.tx === tx && b.ty === ty) by -= Math.sin(b.t / 10 * Math.PI) * 5;
+    drawTile(t, tx * T - cam, Math.round(by), tx, ty);
+  }
+
+  // флаг
+  const fx = Math.round(flagX - cam) + 7;
+  R('#eeeeee', fx, 64, 2, 176); R('#ffd21f', fx - 2, 60, 6, 6);
+  ctx.fillStyle = '#e53935'; ctx.beginPath();
+  const wv = Math.sin(frame * 0.1) * 2;
+  ctx.moveTo(fx, 68); ctx.lineTo(fx - 22, 78 + wv); ctx.lineTo(fx, 88); ctx.fill();
+
+  // монеты
+  for (const c of coins) if (!c.got) {
+    const sx = c.x * T + 8 - cam;
+    if (sx > -10 && sx < VW + 10) drawCoin(sx, c.y * T + 8);
+  }
+  for (const p of pops) drawCoin(p.x + 4 - cam, p.y - p.t * 1.5);
+
+  for (const e of enemies) {
+    if (!e.alive && e.sq <= 0) continue;
+    if (e.x - cam > -20 && e.x - cam < VW + 20) drawEnemy(e);
+  }
+  drawPlayer();
+
+  // HUD
+  ctx.textAlign = 'left'; ctx.font = 'bold 12px monospace';
+  drawCoin(12, 14);
+  shadowText('x ' + coinCount, 22, 18, '#fff');
+  shadowText('♥ ' + Math.max(0, lives), 80, 18, '#ff5a5a');
+  shadowText('очки ' + score, 130, 18, '#fff');
+
+  // экраны
+  if (state === 'title' || state === 'over' || state === 'win') {
+    R('rgba(0,0,0,0.45)', 0, 0, VW, VH);
+    ctx.textAlign = 'center';
+    let head, sub;
+    if (state === 'title') { head = 'ЛИСЁНОК РИКО'; sub = 'Нажми на экран, чтобы начать'; }
+    else if (state === 'over') { head = 'ИГРА ОКОНЧЕНА'; sub = 'Нажми, чтобы начать заново'; }
+    else { head = 'УРОВЕНЬ ПРОЙДЕН!'; sub = 'Монет: ' + coinCount + '   Очки: ' + score; }
+    ctx.font = 'bold 32px sans-serif'; shadowText(head, VW / 2, 110, '#ffb347');
+    ctx.font = 'bold 15px sans-serif';
+    if (state === 'win' || Math.floor(frame / 30) % 2 === 0) shadowText(sub, VW / 2, 150, '#fff');
+    if (state === 'win' && stateT > 60 && Math.floor(frame / 30) % 2 === 0) shadowText('Нажми, чтобы сыграть ещё раз', VW / 2, 176, '#fff');
+    if (state === 'title') {
+      ctx.font = '12px sans-serif';
+      shadowText('◀ ▶  бег     ▲  прыжок (прыгай на врагов сверху!)', VW / 2, 200, '#dfefff');
+    }
+  }
+}
+
+/* ---------- запуск ---------- */
+buildLevel(); respawn();
+let last = 0, acc = 0;
+function loop(t) {
+  requestAnimationFrame(loop);
+  const dt = Math.min(100, t - last); last = t; acc += dt;
+  while (acc >= 1000 / 60) { step(); acc -= 1000 / 60; }
+  draw();
+}
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
